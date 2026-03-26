@@ -1,0 +1,14 @@
+psycopg2-binary==2.9.9
+sentence-transformers==2.7.0
+python-dotenv==1.0.1
+google-generativeai>=0.5.2
+
+# Real data fetching (live data pipeline)
+yfinance>=0.2.40
+feedparser>=6.0.11
+nltk>=3.8.1
+fredapi>=0.5.1
+
+# Streamlit frontend
+streamlit>=1.35.0
+plotly>=5.18.0
