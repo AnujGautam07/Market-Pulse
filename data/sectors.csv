@@ -1,0 +1,25 @@
+sector_id,sector_name,industry_name
+1,Technology,Consumer Electronics
+2,Technology,Software - Infrastructure
+3,Technology,Semiconductors
+4,Communication Services,Internet Content & Information
+5,Communication Services,Entertainment
+6,Technology,Software - Application
+7,Technology,Communication Equipment
+8,Technology,Information Technology Services
+9,Consumer Cyclical,Internet Retail
+10,Consumer Cyclical,Auto Manufacturers
+11,Consumer Cyclical,Home Improvement Retail
+12,Consumer Cyclical,Footwear & Accessories
+13,Consumer Cyclical,Restaurants
+14,Consumer Defensive,Discount Stores
+15,Financial Services,Banks - Diversified
+16,Financial Services,Credit Services
+17,Financial Services,Capital Markets
+18,Healthcare,Drug Manufacturers - General
+19,Healthcare,Healthcare Plans
+20,Energy,Oil & Gas Integrated
+21,Energy,Oil & Gas E&P
+22,Energy,Oil & Gas Equipment & Services
+23,Energy,Oil & Gas Refining & Marketing
+24,Communication Services,Telecom Services
