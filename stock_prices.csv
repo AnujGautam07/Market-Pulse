@@ -1,0 +1,486 @@
+#!/usr/bin/env python3
+# =============================================================================
+# MarketPulse — Dataset Simulator
+# Z2004 DBMS Project | Milestone 2
+#
+# Generates a realistic, referentially-consistent dataset for the MarketPulse
+# schema and writes it as data.csv (one combined long-format file) plus the
+# per-table CSVs used by the import script.
+#
+# This is a DOCUMENTED SIMULATOR (allowed under the Z2004 data policy):
+#   * Stock prices follow Geometric Brownian Motion with per-sector drift and
+#     volatility, so each ticker has a plausible price path (no random noise).
+#   * Daily volume is log-normal and spikes on large-return days.
+#   * News articles are dated to real trading days and their sentiment_score
+#     is correlated with the next-day return of the company they mention,
+#     mimicking the real "news drives price" relationship the RAG pipeline
+#     is built to explain.
+#   * Analyst ratings are sampled from the exact vocabulary allowed by the
+#     schema CHECK constraint.
+#   * Economic indicators reproduce five real FRED series at realistic levels.
+#   * All foreign keys are generated from in-memory parent IDs, so referential
+#     integrity holds by construction.
+#
+# Deterministic: a fixed RNG seed means re-running reproduces the same data.
+# =============================================================================
+
+import csv
+import os
+import random
+import math
+from datetime import date, timedelta, datetime, timezone
+
+SEED = 20260515
+random.seed(SEED)
+
+OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+os.makedirs(OUT_DIR, exist_ok=True)
+
+# ----------------------------------------------------------------------------
+# 1. SECTORS  — GICS-style sector / industry pairs
+# ----------------------------------------------------------------------------
+SECTORS = [
+    ("Technology", "Consumer Electronics"),
+    ("Technology", "Semiconductors"),
+    ("Technology", "Software—Infrastructure"),
+    ("Communication Services", "Internet Content & Information"),
+    ("Consumer Cyclical", "Internet Retail"),
+    ("Consumer Cyclical", "Auto Manufacturers"),
+    ("Financial Services", "Banks—Diversified"),
+    ("Financial Services", "Credit Services"),
+    ("Healthcare", "Drug Manufacturers—General"),
+    ("Energy", "Oil & Gas Integrated"),
+]
+
+# ----------------------------------------------------------------------------
+# 2. COMPANIES  — 25 real tickers mapped to the sectors above
+#    (ticker, name, exchange, sector_index, start_price, annual_drift, annual_vol)
+# ----------------------------------------------------------------------------
+COMPANIES = [
+    ("AAPL",  "Apple Inc.",                 "NASDAQ", 0, 165.0, 0.18, 0.26),
+    ("SONY",  "Sony Group Corporation",     "NYSE",   0,  88.0, 0.10, 0.28),
+    ("NVDA",  "NVIDIA Corporation",         "NASDAQ", 1, 220.0, 0.55, 0.45),
+    ("AMD",   "Advanced Micro Devices",     "NASDAQ", 1, 110.0, 0.30, 0.48),
+    ("INTC",  "Intel Corporation",          "NASDAQ", 1,  35.0, -0.05, 0.34),
+    ("MSFT",  "Microsoft Corporation",      "NASDAQ", 2, 330.0, 0.22, 0.24),
+    ("ORCL",  "Oracle Corporation",         "NYSE",   2, 115.0, 0.20, 0.27),
+    ("CRM",   "Salesforce, Inc.",           "NYSE",   2, 215.0, 0.12, 0.32),
+    ("GOOGL", "Alphabet Inc.",              "NASDAQ", 3, 135.0, 0.16, 0.27),
+    ("META",  "Meta Platforms, Inc.",       "NASDAQ", 3, 310.0, 0.35, 0.38),
+    ("NFLX",  "Netflix, Inc.",              "NASDAQ", 3, 430.0, 0.25, 0.36),
+    ("AMZN",  "Amazon.com, Inc.",           "NASDAQ", 4, 145.0, 0.20, 0.30),
+    ("EBAY",  "eBay Inc.",                  "NASDAQ", 4,  44.0, 0.06, 0.29),
+    ("TSLA",  "Tesla, Inc.",                "NASDAQ", 5, 240.0, 0.15, 0.55),
+    ("F",     "Ford Motor Company",         "NYSE",   5,  12.0, 0.04, 0.36),
+    ("GM",    "General Motors Company",     "NYSE",   5,  38.0, 0.08, 0.34),
+    ("JPM",   "JPMorgan Chase & Co.",       "NYSE",   6, 150.0, 0.14, 0.22),
+    ("BAC",   "Bank of America Corporation","NYSE",   6,  32.0, 0.10, 0.26),
+    ("WFC",   "Wells Fargo & Company",      "NYSE",   6,  45.0, 0.11, 0.27),
+    ("V",     "Visa Inc.",                  "NYSE",   7, 235.0, 0.16, 0.20),
+    ("MA",    "Mastercard Incorporated",    "NYSE",   7, 380.0, 0.17, 0.21),
+    ("PFE",   "Pfizer Inc.",                "NYSE",   8,  38.0, -0.02, 0.23),
+    ("JNJ",   "Johnson & Johnson",          "NYSE",   8, 158.0, 0.06, 0.18),
+    ("XOM",   "Exxon Mobil Corporation",    "NYSE",   9, 105.0, 0.09, 0.25),
+    ("CVX",   "Chevron Corporation",        "NYSE",   9, 155.0, 0.08, 0.24),
+]
+
+# Market-cap anchors (USD). A handful are left as None to exercise the
+# "market_cap_usd may be NULL" path documented in the schema.
+MARKET_CAPS = {
+    "AAPL": 2.6e12, "SONY": 1.1e11, "NVDA": 1.1e12, "AMD": 1.8e11,
+    "INTC": 1.5e11, "MSFT": 2.5e12, "ORCL": 3.1e11, "CRM": 2.1e11,
+    "GOOGL": 1.7e12, "META": 8.0e11, "NFLX": 1.9e11, "AMZN": 1.5e12,
+    "EBAY": 2.4e10, "TSLA": 7.6e11, "F": 4.8e10, "GM": 5.3e10,
+    "JPM": 4.4e11, "BAC": 2.6e11, "WFC": 1.6e11, "V": 4.8e11,
+    "MA": None, "PFE": 2.1e11, "JNJ": None, "XOM": 4.2e11, "CVX": 2.9e11,
+}
+
+# ----------------------------------------------------------------------------
+# Trading-day calendar: ~2 years of weekdays ending 2026-05-09.
+# ----------------------------------------------------------------------------
+END_DATE = date(2026, 5, 9)
+TRADING_DAYS = []
+d = END_DATE
+while len(TRADING_DAYS) < 504:               # ~2 years of trading days
+    if d.weekday() < 5:                       # Mon–Fri only
+        TRADING_DAYS.append(d)
+    d -= timedelta(days=1)
+TRADING_DAYS.reverse()
+DT = 1.0 / 252.0                              # one trading day in years
+
+
+# ----------------------------------------------------------------------------
+# 3. STOCK_PRICES  — Geometric Brownian Motion per company
+# ----------------------------------------------------------------------------
+def simulate_prices():
+    """Return (rows, returns_by_company).
+
+    rows: list of dicts ready for the stock_prices table.
+    returns_by_company: {company_id: {trade_date: daily_return}} — reused to
+                        correlate news sentiment with real price moves.
+    """
+    rows = []
+    returns_by_company = {}
+    for idx, (ticker, name, exch, sec, start_px,
+              drift, vol) in enumerate(COMPANIES, start=1):
+        price = start_px
+        ret_map = {}
+        for td in TRADING_DAYS:
+            # GBM daily step: dS/S = mu*dt + sigma*sqrt(dt)*Z
+            z = random.gauss(0, 1)
+            daily_ret = drift * DT + vol * math.sqrt(DT) * z
+            prev = price
+            price = max(0.5, prev * math.exp(daily_ret))
+            ret_map[td] = (price - prev) / prev
+
+            # Open gaps slightly from previous close; high/low bracket the range.
+            open_px = prev * (1 + random.gauss(0, 0.004))
+            close_px = price
+            hi = max(open_px, close_px) * (1 + abs(random.gauss(0, 0.006)))
+            lo = min(open_px, close_px) * (1 - abs(random.gauss(0, 0.006)))
+            lo = max(0.25, lo)
+
+            # Volume: log-normal, inflated on big-move days (realistic spike).
+            base_vol = math.exp(random.gauss(15.5, 0.6))
+            vol_mult = 1.0 + 6.0 * abs(ret_map[td])
+            volume = int(base_vol * vol_mult)
+
+            rows.append({
+                "company_id": idx,
+                "trade_date": td.isoformat(),
+                "open_price": round(open_px, 4),
+                "high_price": round(hi, 4),
+                "low_price": round(lo, 4),
+                "close_price": round(close_px, 4),
+                "volume": volume,
+                "adjusted_close": round(close_px, 4),
+            })
+        returns_by_company[idx] = ret_map
+    return rows, returns_by_company
+
+
+# ----------------------------------------------------------------------------
+# 4. NEWS_ARTICLES + ARTICLE_COMPANY
+#    Each article is tied to a real trading day and one company. Its sentiment
+#    is correlated with that company's NEXT-day return, mimicking the causal
+#    "news → price" link the RAG pipeline is meant to surface.
+# ----------------------------------------------------------------------------
+NEWS_SOURCES = ["NewsAPI.org", "GNews", "Yahoo Finance RSS", "Google News RSS"]
+
+POS_TEMPLATES = [
+    ("{name} beats quarterly earnings expectations",
+     "{name} reported revenue and profit ahead of analyst estimates, "
+     "citing strong demand and improving margins across its core business."),
+    ("Analysts raise price target on {ticker} after strong guidance",
+     "Several analysts lifted their outlook on {ticker} following upbeat "
+     "forward guidance from {name} management on the latest earnings call."),
+    ("{name} announces new product line, shares climb",
+     "{name} unveiled a new product line that the company expects to expand "
+     "its addressable market, sending {ticker} shares higher in trading."),
+    ("{name} expands into new markets, investors optimistic",
+     "{name} confirmed an expansion into new regional markets, a move "
+     "investors welcomed as a driver of medium-term revenue growth."),
+]
+NEG_TEMPLATES = [
+    ("{name} misses revenue estimates, shares fall",
+     "{name} posted quarterly revenue below Wall Street estimates, with "
+     "management pointing to softer demand and cost pressures."),
+    ("Regulatory probe weighs on {ticker}",
+     "Reports of a regulatory inquiry involving {name} pressured {ticker} "
+     "shares as investors weighed potential fines and compliance costs."),
+    ("{name} cuts full-year outlook, analysts downgrade",
+     "{name} lowered its full-year outlook, prompting multiple analyst "
+     "downgrades and renewed concern about the company's growth trajectory."),
+    ("Supply chain disruption hits {name} production",
+     "{name} flagged a supply chain disruption expected to weigh on "
+     "production volumes and near-term deliveries for {ticker}."),
+]
+NEU_TEMPLATES = [
+    ("{name} to present at upcoming industry conference",
+     "{name} confirmed it will present at an upcoming industry conference, "
+     "where management is expected to discuss strategy and the outlook."),
+    ("{name} schedules quarterly earnings call",
+     "{name} announced the date of its next quarterly earnings call; "
+     "analysts will be watching guidance and margin commentary closely."),
+    ("{ticker} trading volume in focus amid market rotation",
+     "Traders noted shifting volume in {ticker} as the broader market "
+     "rotated between sectors, with no company-specific catalyst reported."),
+]
+
+
+def simulate_news(returns_by_company):
+    """Return (article_rows, article_company_rows).
+
+    ~60 articles per company → 1,500 articles, well above the Track A
+    minimum of 1,000 meaningful rows.
+    """
+    article_rows = []
+    article_company_rows = []
+    article_id = 0
+    # news can be dated to any trading day except the last (need a next-day return)
+    valid_days = TRADING_DAYS[:-1]
+
+    for idx, (ticker, name, *_rest) in enumerate(COMPANIES, start=1):
+        ret_map = returns_by_company[idx]
+        for _ in range(60):
+            td = random.choice(valid_days)
+            nxt = TRADING_DAYS[TRADING_DAYS.index(td) + 1]
+            next_ret = ret_map[nxt]
+
+            # Sentiment is correlated with next-day return, plus noise.
+            raw = 18.0 * next_ret + random.gauss(0, 0.25)
+            sentiment = max(-1.0, min(1.0, raw))
+
+            if sentiment > 0.15:
+                tmpl = random.choice(POS_TEMPLATES)
+            elif sentiment < -0.15:
+                tmpl = random.choice(NEG_TEMPLATES)
+            else:
+                tmpl = random.choice(NEU_TEMPLATES)
+
+            title = tmpl[0].format(name=name, ticker=ticker)
+            body = tmpl[1].format(name=name, ticker=ticker)
+
+            # publication timestamp during market hours, UTC
+            hh = random.randint(13, 21)
+            mm = random.randint(0, 59)
+            published = datetime(td.year, td.month, td.day, hh, mm,
+                                 tzinfo=timezone.utc)
+
+            article_id += 1
+            slug = title.lower().replace(" ", "-").replace(",", "")
+            url = (f"https://news.example.com/{ticker.lower()}/"
+                   f"{td.isoformat()}/{article_id}-{slug}")[:2048]
+
+            article_rows.append({
+                "article_id": article_id,
+                "title": title,
+                "content": body,
+                "url": url,
+                "published_at": published.isoformat(),
+                "source": random.choice(NEWS_SOURCES),
+                "sentiment_score": round(sentiment, 3),
+                # embedding is COMPUTED by the Python RAG pipeline, not here;
+                # left empty so the import loads SQL NULL into VECTOR(768).
+                "embedding": "",
+            })
+            article_company_rows.append({
+                "article_id": article_id,
+                "company_id": idx,
+            })
+
+    return article_rows, article_company_rows
+
+
+# ----------------------------------------------------------------------------
+# 5. ANALYST_RATINGS  — sampled from the schema's allowed rating vocabulary
+# ----------------------------------------------------------------------------
+RATINGS = ["Buy", "Sell", "Hold", "Outperform", "Underperform",
+           "Neutral", "Overweight", "Underweight", "Market Perform"]
+FIRMS = ["Morgan Stanley", "Goldman Sachs", "JP Morgan", "Bank of America",
+         "Barclays", "Citigroup", "Wells Fargo", "Deutsche Bank",
+         "UBS", "Jefferies", "Evercore ISI", "Wedbush"]
+
+
+def simulate_ratings():
+    """~12 ratings per company → ~300 rows. target_price_usd left NULL
+    for most rows, exactly as the schema comment documents."""
+    rows = []
+    rating_id = 0
+    for idx, (ticker, name, *_rest) in enumerate(COMPANIES, start=1):
+        used = set()
+        n = random.randint(10, 15)
+        attempts = 0
+        while len(used) < n and attempts < 60:
+            attempts += 1
+            firm = random.choice(FIRMS)
+            rdate = random.choice(TRADING_DAYS)
+            key = (firm, rdate)
+            if key in used:
+                continue
+            used.add(key)
+            rating_id += 1
+            # ~20% of rows carry a target price, rest NULL (schema-documented)
+            if random.random() < 0.2:
+                tgt = round(random.uniform(20, 600), 2)
+            else:
+                tgt = ""
+            rows.append({
+                "rating_id": rating_id,
+                "company_id": idx,
+                "analyst_firm": firm,
+                "rating": random.choice(RATINGS),
+                "target_price_usd": tgt,
+                "rating_date": rdate.isoformat(),
+            })
+    return rows
+
+
+# ----------------------------------------------------------------------------
+# 6. ECONOMIC_INDICATORS  — five real FRED series at realistic levels
+# ----------------------------------------------------------------------------
+def month_starts(start, end):
+    out, cur = [], date(start.year, start.month, 1)
+    while cur <= end:
+        out.append(cur)
+        cur = date(cur.year + (cur.month // 12),
+                   (cur.month % 12) + 1, 1)
+    return out
+
+
+def simulate_indicators():
+    """5 series x ~25 months = ~125 rows. Mirrors FRED FEDFUNDS, CPIAUCSL,
+    UNRATE, GS10 and a quarterly Real GDP growth series."""
+    rows = []
+    indicator_id = 0
+    months = month_starts(TRADING_DAYS[0], END_DATE)
+
+    series = {
+        "Federal Funds Effective Rate": ("Percent", 5.25, -0.03, 0.05),
+        "Consumer Price Index for All Urban Consumers": (
+            "Index 1982-84=100", 305.0, 0.30, 0.15),
+        "Unemployment Rate": ("Percent", 3.7, 0.01, 0.06),
+        "10-Year Treasury Constant Maturity Rate": ("Percent", 4.1, 0.0, 0.10),
+    }
+    for name, (unit, level, mdrift, mvol) in series.items():
+        val = level
+        for m in months:
+            val = val + mdrift + random.gauss(0, mvol)
+            indicator_id += 1
+            rows.append({
+                "indicator_id": indicator_id,
+                "indicator_name": name,
+                "value": round(val, 6),
+                "recorded_date": m.isoformat(),
+                "source": "FRED",
+                "unit": "Percent" if "Rate" in name else unit,
+            })
+
+    # Quarterly Real GDP growth
+    gdp_val = 2.4
+    for m in months:
+        if m.month in (1, 4, 7, 10):
+            gdp_val = gdp_val + random.gauss(0, 0.4)
+            indicator_id += 1
+            rows.append({
+                "indicator_id": indicator_id,
+                "indicator_name": "Real Gross Domestic Product Growth Rate",
+                "value": round(gdp_val, 6),
+                "recorded_date": m.isoformat(),
+                "source": "FRED",
+                "unit": "Percent",
+            })
+    return rows
+
+
+# ----------------------------------------------------------------------------
+# Writers
+# ----------------------------------------------------------------------------
+def write_csv(filename, fieldnames, rows):
+    path = os.path.join(OUT_DIR, filename)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
+    print(f"  wrote {path:<48} {len(rows):>6} rows")
+    return path
+
+
+def main():
+    print("MarketPulse dataset simulator")
+    print(f"  RNG seed         : {SEED}")
+    print(f"  trading days     : {len(TRADING_DAYS)}  "
+          f"({TRADING_DAYS[0]} .. {TRADING_DAYS[-1]})")
+    print(f"  companies        : {len(COMPANIES)}")
+    print(f"  sectors          : {len(SECTORS)}")
+    print("  generating ...")
+
+    # SECTORS
+    sector_rows = [
+        {"sector_id": i, "sector_name": s, "industry_name": ind}
+        for i, (s, ind) in enumerate(SECTORS, start=1)
+    ]
+
+    # COMPANIES
+    company_rows = []
+    for idx, (ticker, name, exch, sec, *_p) in enumerate(COMPANIES, start=1):
+        cap = MARKET_CAPS.get(ticker)
+        company_rows.append({
+            "company_id": idx,
+            "ticker": ticker,
+            "name": name,
+            "sector_id": sec + 1,                  # sectors are 1-indexed
+            "exchange": exch,
+            "market_cap_usd": "" if cap is None else round(cap, 2),
+        })
+
+    price_rows, returns_by_company = simulate_prices()
+    article_rows, ac_rows = simulate_news(returns_by_company)
+    rating_rows = simulate_ratings()
+    indicator_rows = simulate_indicators()
+
+    # Per-table CSVs (used by import_data.sql via \copy)
+    write_csv("sectors.csv",
+              ["sector_id", "sector_name", "industry_name"], sector_rows)
+    write_csv("companies.csv",
+              ["company_id", "ticker", "name", "sector_id",
+               "exchange", "market_cap_usd"], company_rows)
+    write_csv("stock_prices.csv",
+              ["company_id", "trade_date", "open_price", "high_price",
+               "low_price", "close_price", "volume", "adjusted_close"],
+              price_rows)
+    write_csv("news_articles.csv",
+              ["article_id", "title", "content", "url", "published_at",
+               "source", "sentiment_score", "embedding"], article_rows)
+    write_csv("article_company.csv",
+              ["article_id", "company_id"], ac_rows)
+    write_csv("analyst_ratings.csv",
+              ["rating_id", "company_id", "analyst_firm", "rating",
+               "target_price_usd", "rating_date"], rating_rows)
+    write_csv("economic_indicators.csv",
+              ["indicator_id", "indicator_name", "value",
+               "recorded_date", "source", "unit"], indicator_rows)
+
+    # Combined long-format data.csv — satisfies the literal M2 deliverable
+    # "data.csv or data.json". One row per fact, table-tagged.
+    combined = []
+    for r in sector_rows:
+        combined.append({"table_name": "sectors", "record_json":
+                         _json(r)})
+    for r in company_rows:
+        combined.append({"table_name": "companies", "record_json": _json(r)})
+    for r in price_rows:
+        combined.append({"table_name": "stock_prices", "record_json": _json(r)})
+    for r in article_rows:
+        combined.append({"table_name": "news_articles", "record_json": _json(r)})
+    for r in ac_rows:
+        combined.append({"table_name": "article_company", "record_json": _json(r)})
+    for r in rating_rows:
+        combined.append({"table_name": "analyst_ratings", "record_json": _json(r)})
+    for r in indicator_rows:
+        combined.append({"table_name": "economic_indicators",
+                         "record_json": _json(r)})
+    write_csv("data.csv", ["table_name", "record_json"], combined)
+
+    total = (len(sector_rows) + len(company_rows) + len(price_rows) +
+             len(article_rows) + len(ac_rows) + len(rating_rows) +
+             len(indicator_rows))
+    print(f"  TOTAL ROWS       : {total}")
+    print(f"    sectors             {len(sector_rows):>6}")
+    print(f"    companies           {len(company_rows):>6}")
+    print(f"    stock_prices        {len(price_rows):>6}")
+    print(f"    news_articles       {len(article_rows):>6}   "
+          f"(Track A min: 1000)")
+    print(f"    article_company     {len(ac_rows):>6}")
+    print(f"    analyst_ratings     {len(rating_rows):>6}")
+    print(f"    economic_indicators {len(indicator_rows):>6}")
+    print("  done.")
+
+
+def _json(d):
+    import json
+    return json.dumps(d, separators=(",", ":"), ensure_ascii=False)
+
+
+if __name__ == "__main__":
+    main()

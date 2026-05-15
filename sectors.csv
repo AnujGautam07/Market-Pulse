@@ -1,0 +1,82 @@
+-- =============================================================================
+-- MarketPulse — verify.sql
+-- Z2004 DBMS Project | Milestone 2
+--
+-- Optional sanity-check script. Run AFTER schema.sql + import_data.sql to
+-- confirm the dataset loaded with full referential integrity and that the
+-- minimum row counts for Track A are met.
+--
+--   psql -d marketpulse -f scripts/verify.sql
+-- =============================================================================
+
+\echo '== Row counts =='
+SELECT 'sectors'             AS table_name, COUNT(*) AS rows FROM sectors
+UNION ALL SELECT 'companies',            COUNT(*) FROM companies
+UNION ALL SELECT 'stock_prices',         COUNT(*) FROM stock_prices
+UNION ALL SELECT 'news_articles',        COUNT(*) FROM news_articles
+UNION ALL SELECT 'article_company',      COUNT(*) FROM article_company
+UNION ALL SELECT 'analyst_ratings',      COUNT(*) FROM analyst_ratings
+UNION ALL SELECT 'economic_indicators',  COUNT(*) FROM economic_indicators
+ORDER BY table_name;
+
+\echo ''
+\echo '== Track A minimum check (news_articles must be >= 1000) =='
+SELECT
+    COUNT(*)                              AS news_article_rows,
+    CASE WHEN COUNT(*) >= 1000
+         THEN 'PASS' ELSE 'FAIL' END      AS track_a_minimum
+FROM news_articles;
+
+\echo ''
+\echo '== Referential integrity (every count must be 0) =='
+SELECT 'orphan stock_prices' AS check_name, COUNT(*) AS bad_rows
+  FROM stock_prices sp
+  LEFT JOIN companies c ON c.company_id = sp.company_id
+  WHERE c.company_id IS NULL
+UNION ALL
+SELECT 'orphan article_company -> article', COUNT(*)
+  FROM article_company ac
+  LEFT JOIN news_articles n ON n.article_id = ac.article_id
+  WHERE n.article_id IS NULL
+UNION ALL
+SELECT 'orphan article_company -> company', COUNT(*)
+  FROM article_company ac
+  LEFT JOIN companies c ON c.company_id = ac.company_id
+  WHERE c.company_id IS NULL
+UNION ALL
+SELECT 'orphan analyst_ratings', COUNT(*)
+  FROM analyst_ratings ar
+  LEFT JOIN companies c ON c.company_id = ar.company_id
+  WHERE c.company_id IS NULL;
+
+\echo ''
+\echo '== Domain constraint checks (every count must be 0) =='
+SELECT 'high_price < low_price' AS check_name, COUNT(*) AS bad_rows
+  FROM stock_prices WHERE high_price < low_price
+UNION ALL
+SELECT 'non-positive prices', COUNT(*)
+  FROM stock_prices
+  WHERE open_price <= 0 OR close_price <= 0
+     OR high_price <= 0 OR low_price <= 0
+UNION ALL
+SELECT 'sentiment out of [-1,1]', COUNT(*)
+  FROM news_articles
+  WHERE sentiment_score IS NOT NULL
+    AND (sentiment_score < -1 OR sentiment_score > 1)
+UNION ALL
+SELECT 'rating outside allowed vocab', COUNT(*)
+  FROM analyst_ratings
+  WHERE rating NOT IN ('Buy','Sell','Hold','Outperform','Underperform',
+                       'Neutral','Overweight','Underweight','Market Perform');
+
+\echo ''
+\echo '== Coverage summary =='
+SELECT
+    (SELECT COUNT(DISTINCT ticker) FROM companies)                AS distinct_tickers,
+    (SELECT MIN(trade_date) FROM stock_prices)                    AS first_trade_date,
+    (SELECT MAX(trade_date) FROM stock_prices)                    AS last_trade_date,
+    (SELECT COUNT(*) FROM companies WHERE market_cap_usd IS NULL) AS null_market_caps,
+    (SELECT COUNT(DISTINCT indicator_name) FROM economic_indicators) AS fred_series;
+
+\echo ''
+\echo '== Verification complete =='
