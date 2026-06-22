@@ -1,3 +1,4 @@
+
 -- =============================================================================
 -- MarketPulse — performance.sql
 -- Z2004 Database Management Systems | IIT Madras Zanzibar | Milestone 3
@@ -15,15 +16,15 @@
 -- =============================================================================
 -- SECTION 1: TEST ENVIRONMENT
 -- =============================================================================
--- PostgreSQL 16 with pgvector 0.6.0
--- Dataset: 7 tables, 16,063 total rows
---   stock_prices:        12,600 rows (25 tickers × ~504 trading days)
---   news_articles:        1,500 rows
---   article_company:      1,500 rows (junction table)
---   analyst_ratings:        324 rows
---   economic_indicators:    104 rows
---   companies:               25 rows
---   sectors:                 10 rows
+-- PostgreSQL 18 with pgvector
+-- Dataset: 7 tables, 89,223 total rows
+--   stock_prices:        25,050 rows (50 tickers x 501 trading days)
+--   news_articles:       16,429 rows
+--   article_company:     16,858 rows (junction table)
+--   analyst_ratings:     27,214 rows
+--   economic_indicators:  3,598 rows
+--   companies:               50 rows
+--   sectors:                 24 rows
 
 
 -- =============================================================================
