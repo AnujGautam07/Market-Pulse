@@ -46,47 +46,23 @@ def generate_answer(query, context):
     if not generation_model:
         return _fallback_answer(query, context, "LLM is not configured (missing API key).")
     
-    prompt = f"""You are a senior financial analyst for the MarketPulse intelligence platform.
+    prompt = f"""
+You are a financial analyst AI for the MarketPulse platform. Your task is to answer the user's question using ONLY the provided data context.
+If the context doesn't contain enough information to fully answer the question, state that clearly.
+Do not make up facts or use outside knowledge.
 
-Answer the user's question using ONLY the data provided in the context below.
-Be detailed, explanatory and educational. Explain the WHY behind every number you cite.
-
-FORMAT YOUR RESPONSE USING EXACTLY THESE MARKDOWN SECTIONS:
-
-## Summary
-A 2 to 3 sentence executive overview that directly answers the question.
-
-## Key Findings
-1. First key finding with a specific data point cited inline as (Source: [1]) or (Prices, date) or (FRED: indicator).
-2. Second key finding with inline citation.
-3. Further findings as the data warrants.
-
-## Market Analysis
-Detailed discussion of price trends, volumes, and patterns. Reference specific dates and dollar values from the context.
-
-## Analyst Perspective
-What the analyst ratings reveal about market sentiment and institutional view. If no analyst data is available, state that.
-
-## Macroeconomic Context
-How the FRED indicators (interest rates, inflation, GDP, VIX, oil, etc.) relate to the question and the company.
-
-## Sources
-List every article and data source referenced:
-[1] Article title - source name - date
-[2] Article title - source name - date
-(Also include: Stock price data from yfinance, Analyst ratings from yfinance upgrades/downgrades, Macro data from FRED.)
-
-RULES:
-- Cite inline using the format: (Source: [1]) for articles, (Prices, date) for price data, (FRED: indicator name) for macro.
-- Do not use em dashes. Use commas or colons instead.
-- Do not use emojis.
-- Do not leave any section blank. If data is missing, write "No data available for this section."
-- Be specific: quote actual numbers, dates, company names, and analyst firm names from the context.
+CRITICAL REQUIREMENT: You MUST provide inline source citations for every claim you make based on the context. 
+For example:
+- "Apple's stock closed at $150.00 on 2025-01-10 (Source: Stock Prices, 2025-01-10)."
+- "Analysts at Morgan Stanley rate NVDA as a Buy (Source: Analyst Ratings, Morgan Stanley, 2025-01-15)."
+- "A recent news article noted an earnings beat (Source: News, Yahoo Finance, 2025-01-10)."
 
 Context:
 {context}
 
-Question: {query}
+User Question: {query}
+
+Answer concisely and clearly with inline citations:
 """
     last_error = None
     for model_name in GENERATION_MODEL_CANDIDATES:
